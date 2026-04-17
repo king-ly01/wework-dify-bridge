@@ -37,6 +37,5 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     """保存配置文件"""
-    ensure_project_dir()
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
