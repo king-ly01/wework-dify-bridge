@@ -11,12 +11,13 @@
 1. [架构说明](#1-架构说明)
 2. [项目结构](#2-项目结构)
 3. [安装依赖](#3-安装依赖)
-4. [config.json 配置说明](#4-configjson-配置说明)
-5. [启动与停止](#5-启动与停止)
-6. [Dify 工作流配置要求](#6-dify-工作流配置要求)
-7. [Dify HTTP 通知节点配置](#7-dify-http-通知节点配置)
-8. [Dify Squid 代理白名单配置](#8-dify-squid-代理白名单配置)
-9. [常见问题排查](#9-常见问题排查)
+4. [管理工具 manage.py](#4-管理工具-managepy)
+5. [config.json 配置说明](#5-configjson-配置说明)
+6. [启动与停止](#6-启动与停止)
+7. [Dify 工作流配置要求](#7-dify-工作流配置要求)
+8. [Dify HTTP 通知节点配置](#8-dify-http-通知节点配置)
+9. [Dify Squid 代理白名单配置](#9-dify-squid-代理白名单配置)
+10. [常见问题排查](#10-常见问题排查)
 
 ---
 
@@ -60,6 +61,8 @@ wework-dify-bridge/
 
 ## 3. 安装依赖
 
+> 安装完成后通过 `manage.py` 管理机器人，无需手动编辑 config.json。
+
 ### Linux / macOS
 
 ```bash
@@ -80,7 +83,90 @@ start.bat install
 
 ---
 
-## 4. config.json 配置说明
+## 4. 管理工具 manage.py
+
+所有机器人的增删查改都通过 `manage.py` 完成，**无需手动编辑 config.json**。
+
+### 命令一览
+
+| 命令 | 说明 |
+|------|------|
+| `python manage.py list` | 查看所有机器人 |
+| `python manage.py add` | 添加机器人（交互式引导，自动生成 token）|
+| `python manage.py show <id>` | 查看某个机器人的完整信息 + Dify HTTP节点 Body 示例 |
+| `python manage.py delete <id>` | 删除机器人 |
+| `python manage.py token <id>` | 查看或重新生成 token |
+
+### 典型流程
+
+```bash
+# 第一步：添加机器人
+python manage.py add
+# 按提示输入：机器人ID、描述、企微 bot_id、secret、Dify api_key 等
+# 完成后自动生成 token 并显示在终端
+
+# 第二步：把显示的 token 粘贴到 Dify 工作流的环境变量 bridge_token
+
+# 第三步：重启服务
+./start.sh restart
+
+# 查看所有机器人
+python manage.py list
+
+# 查看某个机器人详情（包含 Dify HTTP节点 Body 示例）
+python manage.py show bot-meeting
+
+# 删除机器人
+python manage.py delete bot-hr
+
+# token 泄露了？重新生成
+python manage.py token bot-meeting
+```
+
+### add 命令交互示例
+
+```
+$ python manage.py add
+
+━━━ 添加新机器人 ━━━
+
+  机器人 ID（唯一标识，如 bot-meeting）: bot-meeting
+  描述（备注，可留空）: 会议室预订机器人
+
+  ── 企业微信配置 ──
+  企微机器人 Bot ID: aibpKUnDe2xfKl...
+  企微机器人 Secret: KulVSMRhNcIp...
+
+  ── Dify 配置 ──
+  Dify API Base [http://127.0.0.1/v1]: 
+  Dify API Key（app-xxx）: app-0qW0m8xPD3...
+  工作流输入变量名 [input]: 
+  工作流输出变量名 [text]: 
+  超时秒数 [60]: 
+
+  ── 其他配置 ──
+  默认 chatid（可留空，后续从日志获取）: 
+  欢迎语 [你好！有什么可以帮你的吗？]: 
+  等待提示 [⏳ 思考中...]: 
+
+══════════════════════════════════════════════════════════════
+  ✅ 机器人 [bot-meeting] 添加成功！
+══════════════════════════════════════════════════════════════
+
+  Token（请复制到 Dify 环境变量 bridge_token）：
+  a3f8c2d1e4b5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
+
+  Dify HTTP 节点 Body 示例：
+  {"token":"a3f8c2...","content":"{{#LLM节点ID.text#}}"}
+
+  重启服务后生效：
+  ./start.sh restart
+══════════════════════════════════════════════════════════════
+```
+
+---
+
+## 5. config.json 配置说明
 
 初次使用先复制模板：
 
@@ -173,7 +259,7 @@ python3 -c "import secrets; print(secrets.token_hex(16))"
 
 ---
 
-## 5. 启动与停止
+## 6. 启动与停止
 
 ### Linux / macOS
 
@@ -216,7 +302,7 @@ start.bat log        # 查看最近日志
 
 ---
 
-## 6. Dify 工作流配置要求
+## 7. Dify 工作流配置要求
 
 ### 6.1 开始节点
 
@@ -257,7 +343,7 @@ HTTP 节点 Body 中使用：
 
 ---
 
-## 7. Dify HTTP 通知节点配置
+## 8. Dify HTTP 通知节点配置
 
 当工作流中间步骤需要主动推送消息到企微时，添加 HTTP 节点：
 
@@ -288,7 +374,7 @@ HTTP 节点 Body 中使用：
 
 ---
 
-## 8. Dify Squid 代理白名单配置
+## 9. Dify Squid 代理白名单配置
 
 Dify 的 HTTP 节点请求经过内置 squid 代理（SSRF 防护），必须将宿主机 IP 加入白名单。
 
@@ -327,7 +413,7 @@ docker exec -it docker-ssrf_proxy-1 tail -f /var/log/squid/access.log
 
 ---
 
-## 9. 常见问题排查
+## 10. 常见问题排查
 
 ### 机器人回复 `{}`
 
