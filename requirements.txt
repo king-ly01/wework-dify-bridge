@@ -1,2 +1,14 @@
-wecom-aibot-sdk-python
-aiohttp
+# wework-dify-bridge 依赖列表
+# 安装方式: pip install -r requirements.txt
+
+# 企业微信 SDK
+wecom-aibot-sdk-python>=0.1.0
+
+# HTTP 服务器和客户端
+aiohttp>=3.8.0
+
+# 数据类（Python 3.6-3.7 需要，3.8+ 内置）
+dataclasses; python_version<"3.8"
+
+# 类型提示扩展
+typing-extensions>=4.0.0; python_version<"3.10"

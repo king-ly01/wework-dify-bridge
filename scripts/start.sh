@@ -3,9 +3,10 @@
 # 用法：./start.sh [start|stop|restart|status|log]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MAIN="$SCRIPT_DIR/wework_smart_bot_final.py"
-LOG="$SCRIPT_DIR/bridge.log"
-PID_FILE="$SCRIPT_DIR/bridge.pid"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MAIN="$PROJECT_DIR/core/bridge_server.py"
+LOG="$PROJECT_DIR/bridge.log"
+PID_FILE="$PROJECT_DIR/bridge.pid"
 PYTHON=$(command -v python3 || command -v python)
 
 # ── 颜色 ────────────────────────────────────
@@ -22,7 +23,8 @@ get_pid() {
             return
         fi
     fi
-    pgrep -f "wework_smart_bot_final.py" | head -1
+    # 从进程列表查找
+    pgrep -f "core/bridge_server.py" | head -1
 }
 
 do_start() {

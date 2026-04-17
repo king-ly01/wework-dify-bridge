@@ -1,0 +1,931 @@
+#!/usr/bin/env python3
+# encoding:utf-8
+"""
+Bridge CLI - 企微-Dify 桥接管理工具
+
+用法:
+    bridge start              启动服务
+    bridge stop               停止服务
+    bridge restart            重启服务
+    bridge status             查看运行状态
+    bridge logs               查看日志
+    bridge id                 查看所有机器人列表
+    bridge id <id>            查看指定机器人详情
+    bridge config             交互式配置新机器人
+    bridge gateway            查看网关配置
+    bridge gateway port 8899  修改网关端口
+"""
+
+import json
+import os
+import secrets
+import sys
+import shutil
+
+# 导入 TUI 组件（蓝色主题）
+from .tui import (
+    interactive_menu, confirm_dialog, input_dialog, info_dialog,
+    print_config_result, blue, bright_blue
+)
+
+# 导入核心模块
+from .core import (
+    CONFIG_FILE, PID_FILE, LOG_FILE,
+    load_config, save_config,
+    is_running, start_service, stop_service,
+    validate_bot_id_uniqueness
+)
+
+# 导入网络模块
+from .network import (
+    test_wecom_connection,
+    test_dify_connection,
+    wait_for_chatid,
+    send_welcome_message
+)
+
+# 导入工具
+from .utils import get_host_ip
+
+
+class MenuCancelled(Exception):
+    """用户取消菜单选择"""
+    pass
+
+
+# ── 命令实现 ──────────────────────────────────────────────────
+
+def cmd_start():
+    """启动服务"""
+    success, msg = start_service(PID_FILE, LOG_FILE)
+    if success:
+        print(green(f"✅ {msg}"))
+    else:
+        print(yellow(f"⚠️  {msg}"))
+
+
+def cmd_stop():
+    """停止服务"""
+    success, msg = stop_service(PID_FILE)
+    if success:
+        print(green(f"✅ {msg}"))
+    else:
+        print(yellow(f"⚠️  {msg}"))
+
+
+def cmd_restart():
+    """重启服务"""
+    running, _ = is_running(PID_FILE)
+    if running:
+        cmd_stop()
+    cmd_start()
+
+
+def cmd_status():
+    """查看服务状态"""
+    running, pid = is_running(PID_FILE)
+    cfg = load_config()
+    port = cfg.get("service", {}).get("notify_port", 8899)
+    
+    print()
+    print(bold("=" * 60))
+    print(bold("  服务状态"))
+    print(bold("=" * 60))
+    print()
+    
+    if running:
+        print(f"  状态:     {green('运行中')}")
+        print(f"  PID:      {cyan(str(pid))}")
+    else:
+        print(f"  状态:     {red('已停止')}")
+    
+    print(f"  端口:     {cyan(str(port))}")
+    print(f"  配置目录: {gray(CONFIG_FILE)}")
+    print()
+    print(bold("=" * 60))
+    print()
+
+
+def cmd_logs(lines: int = 50, follow: bool = False):
+    """查看日志"""
+    if not os.path.exists(LOG_FILE):
+        print(yellow("日志文件不存在"))
+        return
+    
+    if follow:
+        # 实时跟踪日志
+        print(gray("按 Ctrl+C 退出日志跟踪"))
+        print()
+        try:
+            import subprocess
+            subprocess.run(["tail", "-f", LOG_FILE])
+        except KeyboardInterrupt:
+            print()
+    else:
+        # 显示最后 N 行
+        try:
+            with open(LOG_FILE, 'r') as f:
+                all_lines = f.readlines()
+                for line in all_lines[-lines:]:
+                    print(line, end='')
+        except Exception as e:
+            print(red(f"读取日志失败: {e}"))
+
+
+def cmd_id(bot_id: str = None):
+    """查看机器人列表或详情"""
+    cfg = load_config()
+    bots = cfg.get("bots", [])
+    
+    if bot_id:
+        # 查看指定机器人详情
+        for bot in bots:
+            if bot.get("id") == bot_id:
+                print()
+                print(bold("=" * 60))
+                print(bold(f"  机器人详情: {bot_id}"))
+                print(bold("=" * 60))
+                print()
+                print(f"  ID:          {cyan(bot.get('id', 'N/A'))}")
+                print(f"  配置人:      {cyan(bot.get('owner', 'N/A'))}")
+                print(f"  功能描述:    {bot.get('description', 'N/A')}")
+                print(f"  Token:       {gray(bot.get('token', 'N/A')[:20])}...")
+                print()
+                print(f"  企业微信 Bot ID: {cyan(bot.get('wecom', {}).get('bot_id', 'N/A'))}")
+                print()
+                print(f"  Dify API Base: {cyan(bot.get('dify', {}).get('api_base', 'N/A'))}")
+                print()
+                print(bold("=" * 60))
+                print()
+                return
+        print(red(f"找不到机器人: {bot_id}"))
+    else:
+        # 列出所有机器人
+        print()
+        print(bold("=" * 60))
+        print(bold("  机器人列表"))
+        print(bold("=" * 60))
+        print()
+        
+        if not bots:
+            print(gray("  暂无配置的机器人"))
+        else:
+            print(f"  {'ID':<20} {'配置人':<12} {'功能描述'}")
+            print("  " + "-" * 56)
+            for bot in bots:
+                bid = bot.get('id', 'N/A')[:18]
+                owner = bot.get('owner', 'N/A')[:10]
+                desc = bot.get('description', 'N/A')[:20]
+                print(f"  {cyan(bid):<20} {owner:<12} {gray(desc)}")
+        
+        print()
+        print(gray("  查看详情: bridge id <机器人ID>"))
+        print(bold("=" * 60))
+        print()
+
+
+def cmd_config():
+    """交互式机器人配置管理（TUI 版本）"""
+    while True:
+        try:
+            cfg = load_config()
+            bot_count = len(cfg.get("bots", []))
+            
+            choice = interactive_menu(
+                f"机器人管理  (当前: {bot_count}个)",
+                [
+                    ("1", "新增机器人连接"),
+                    ("2", "修改机器人连接"),
+                    ("3", "查询机器人连接"),
+                    ("4", "删除机器人连接"),
+                ]
+            )
+            
+            if choice is None:
+                break
+            elif choice == "1":
+                create_robot_tui()
+            elif choice == "2":
+                modify_robot_tui()
+            elif choice == "3":
+                query_robots_tui()
+            elif choice == "4":
+                delete_robot_tui()
+        
+        except KeyboardInterrupt:
+            print()
+            print(blue("  已退出"))
+            print()
+            break
+        except Exception as e:
+            print()
+            print(blue(f"  错误: {e}"))
+            print()
+            input(blue("  按回车键继续..."))
+
+
+def create_robot_tui():
+    """TUI 版本创建机器人"""
+    cfg = load_config()
+    
+    try:
+        # 1. 配置人信息
+        owner = input_dialog("请输入您的姓名")
+        if not owner:
+            return
+        
+        # 2. 机器人 ID
+        while True:
+            bot_id = input_dialog("请输入机器人 ID")
+            if not bot_id:
+                return
+            valid, msg = validate_bot_id_uniqueness(cfg.get("bots", []), owner, bot_id)
+            if valid:
+                break
+            info_dialog(f"错误: {msg}")
+        
+        # 3. 描述
+        description = input_dialog("请输入机器人用途描述")
+        
+        # 4. 企微配置
+        wecom_bot_id = input_dialog("请输入企业微信 Bot ID")
+        if not wecom_bot_id:
+            return
+        
+        wecom_secret = input_dialog("请输入企业微信 Secret")
+        if not wecom_secret:
+            return
+        
+        # 测试连接
+        info_dialog("正在测试企业微信连接...")
+        success, msg = test_wecom_connection(wecom_bot_id, wecom_secret)
+        if not success:
+            if not confirm_dialog(f"连接失败: {msg}\n是否继续配置?"):
+                return
+        
+        # 5. 获取 chatid
+        info_dialog("请在企业微信中给机器人发送一条消息\n(例如: '你好' 或 '开始配置')\n\n等待消息中...")
+        success, result = wait_for_chatid(wecom_bot_id, wecom_secret, timeout=60)
+        
+        if success:
+            chatid = result
+            info_dialog(f"已收到消息！获取到 Chat ID\n发送欢迎消息中...")
+            send_welcome_message(wecom_bot_id, wecom_secret, chatid, owner, bot_id)
+        else:
+            chatid = ""
+            info_dialog(f"未收到消息: {result}\n您可以稍后在配置文件中手动添加 chatid")
+        
+        # 6. Dify 配置
+        dify_api_base = input_dialog("请输入 Dify API Base URL", default="http://127.0.0.1/v1")
+        dify_api_key = input_dialog("请输入 Dify API Key (app-xxx)")
+        
+        if dify_api_key:
+            info_dialog("正在测试 Dify 连接...")
+            success, msg = test_dify_connection(dify_api_base, dify_api_key)
+            if not success:
+                if not confirm_dialog(f"连接失败: {msg}\n是否继续配置?"):
+                    return
+        
+        # 7. 保存配置
+        token = secrets.token_hex(20)
+        
+        bot_entry = {
+            "id": bot_id,
+            "owner": owner,
+            "description": description,
+            "token": token,
+            "wecom": {
+                "bot_id": wecom_bot_id,
+                "secret": wecom_secret
+            },
+            "dify": {
+                "api_base": dify_api_base,
+                "api_key": dify_api_key,
+                "input_variable": "input",
+                "output_variable": "text",
+                "timeout": 60
+            },
+            "default_chatid": chatid,
+            "welcome_message": f"你好！我是{description}，有什么可以帮你的吗？",
+            "thinking_message": "⏳ 思考中..."
+        }
+        
+        cfg["bots"].append(bot_entry)
+        save_config(cfg)
+        
+        # 8. 显示结果
+        port = cfg.get("service", {}).get("notify_port", 8899)
+        host_ip = get_host_ip()
+        
+        docker_url = f"http://host.docker.internal:{port}/notify?token={token}"
+        host_url = f"http://{host_ip}:{port}/notify?token={token}"
+        
+        print_config_result(bot_id, owner, description, docker_url, host_url, port)
+    
+    except KeyboardInterrupt:
+        raise
+
+
+def query_robots_tui():
+                print()
+                print(gray("  可能原因:"))
+                print(gray("    - Bot ID 或 Secret 输入错误"))
+                print(gray("    - 网络无法连接到企业微信服务器"))
+                print(gray("    - 机器人未在企业微信后台启用"))
+                print()
+                retry = prompt("是否重新输入 (y/n)", default="y", required=False)
+                if retry.lower() != "y":
+                    print(yellow("  跳过测试，继续配置..."))
+                    break
+        
+        # 4. 等待用户发送消息以获取 chatid
+        print_section("获取 Chat ID")
+        print()
+        print(purple("  📱 请在企业微信中给机器人发送一条消息"))
+        print(gray("     （例如：'你好' 或 '开始配置'）"))
+        print()
+        print(gray("  正在等待消息...（60秒超时）"))
+        print()
+        
+        success, result = wait_for_chatid(wecom_bot_id, wecom_secret, timeout=60)
+        
+        if success:
+            chatid = result
+            print(green(f"  ✓ 已收到消息！Chat ID: {chatid[:20]}..."))
+            
+            # 发送欢迎消息
+            print()
+            print(gray("  正在发送欢迎消息..."))
+            if send_welcome_message(wecom_bot_id, wecom_secret, chatid, owner, bot_id):
+                print(green("  ✓ 欢迎消息已发送！请查看企业微信"))
+            else:
+                print(yellow("  ⚠️  欢迎消息发送失败"))
+        else:
+            print(yellow(f"  ⚠️  {result}"))
+            print(gray("  您可以稍后在配置文件中手动添加 chatid"))
+            chatid = ""
+        
+        # 5. Dify 配置（带连接测试）
+        print_section("Dify 配置")
+        while True:
+            dify_api_base = prompt("API Base URL", default="http://127.0.0.1/v1")
+            dify_api_key = prompt("API Key (app-xxx)")
+            
+            print()
+            print(gray("  正在测试 Dify 连接..."))
+            success, msg = test_dify_connection(dify_api_base, dify_api_key)
+            
+            if success:
+                print(green(f"  ✓ Dify 连接成功！"))
+                break
+            else:
+                print(red(f"  ✗ 连接失败: {msg}"))
+                print()
+                print(gray("  可能原因:"))
+                print(gray("    - API Key 输入错误"))
+                print(gray("    - Dify 服务地址错误或服务未启动"))
+                print(gray("    - 网络无法连接到 Dify 服务器"))
+                print()
+                retry = prompt("是否重新输入 (y/n)", default="y", required=False)
+                if retry.lower() != "y":
+                    print(yellow("  跳过测试，继续配置..."))
+                    break
+    
+    except CancelledError:
+        print()
+        print(yellow("  ⚠️  配置已取消"))
+        print()
+        return
+    
+    # 6. 生成 token
+    token = secrets.token_hex(20)
+    
+    # 7. 组装配置
+    bot_entry = {
+        "id": bot_id,
+        "owner": owner,
+        "description": description,
+        "token": token,
+        "wecom": {
+            "bot_id": wecom_bot_id,
+            "secret": wecom_secret
+        },
+        "dify": {
+            "api_base": dify_api_base,
+            "api_key": dify_api_key,
+            "input_variable": "input",
+            "output_variable": "text",
+            "timeout": 60
+        },
+        "default_chatid": chatid,
+        "welcome_message": f"你好！我是{description}，有什么可以帮你的吗？",
+        "thinking_message": "⏳ 思考中..."
+    }
+    
+    cfg["bots"].append(bot_entry)
+    save_config(cfg)
+    
+    port = cfg.get("service", {}).get("notify_port", 8899)
+    host_ip = get_host_ip()
+    
+    # 生成三种部署场景的 URL
+    docker_url = f"http://host.docker.internal:{port}/notify?token={token}"
+    host_url = f"http://{host_ip}:{port}/notify?token={token}"
+    
+    # 显示配置结果（酷炫风格）
+    print()
+    print_title("配置成功")
+    print()
+    print(purple(f"  ◆ 机器人: {white(bot_id)}"))
+    print(purple(f"  ◆ 配置人: {white(owner)}"))
+    print(purple(f"  ◆ 功能: {white(description)}"))
+    print()
+    print_section("Dify HTTP 节点配置")
+    print()
+    
+    # 场景 1: 本地 Docker 部署
+    print(cyan("  【场景 1】本地 Docker 部署 Dify"))
+    print(purple("  ┌─ URL 选项 A（推荐）:"))
+    print(f"  │ {white(docker_url)}")
+    print(purple("  ├─ URL 选项 B:"))
+    print(f"  │ {white(host_url)}")
+    print(purple("  └─"))
+    print(gray("     提示: 选项 A 适用于 Docker Desktop，选项 B 适用于 Linux Docker"))
+    print()
+    
+    # 场景 2: 服务器部署
+    print(cyan("  【场景 2】服务器部署 Dify + Bridge"))
+    print(purple("  ┌─ URL:"))
+    print(f"  │ {white(host_url)}")
+    print(purple("  └─"))
+    print(gray(f"     确保防火墙开放端口 {port}"))
+    print()
+    
+    print(purple("  ┌─ Body（二选一）"))
+    print(purple("  │ 方式1 - 直接文本（推荐）:"))
+    print(f"  │   {white('{{#LLM.text#}}')}")
+    print(purple("  │ 方式2 - JSON 格式:"))
+    print(f"  │   {white('{\"content\":\"{{#LLM.text#}}\"}')}")
+    print(purple("  └─"))
+    print()
+    print(purple("  ═══════════════════════════════════════════════════════"))
+    print(white("  💡 提示: URL 已包含 token，Body 直接填变量即可"))
+    print()
+    print(yellow("  ⚠️  重启服务后生效: bridge restart"))
+    print()
+    
+    # 等待用户按键返回
+    prompt("按回车键返回主菜单", default="", required=False)
+
+
+def query_robots_tui():
+    """TUI 版本查询机器人"""
+    cfg = load_config()
+    bots = cfg.get("bots", [])
+    
+    owner = input_dialog("请输入您的姓名")
+    if not owner:
+        return
+    
+    owner_bots = [bot for bot in bots if bot.get("owner") == owner]
+    
+    if not owner_bots:
+        info_dialog(f"未找到 {owner} 的机器人")
+        return
+    
+    # 构建显示文本
+    msg = f"{owner} 的机器人:\n\n"
+    for idx, bot in enumerate(owner_bots, 1):
+        bid = bot.get('id', 'N/A')
+        desc = bot.get('description', '无描述')
+        has_chatid = bool(bot.get('default_chatid'))
+        status = "已就绪" if has_chatid else "待配置"
+        msg += f"{idx}. {bid}\n   {desc}\n   状态: {status}\n\n"
+    
+    info_dialog(msg)
+
+
+def modify_robot_tui():
+    """TUI 版本修改机器人"""
+    cfg = load_config()
+    bots = cfg.get("bots", [])
+    
+    owner = input_dialog("请输入您的姓名")
+    if not owner:
+        return
+    
+    owner_bots = [bot for bot in bots if bot.get("owner") == owner]
+    
+    if not owner_bots:
+        info_dialog(f"未找到 {owner} 的机器人")
+        return
+    
+    # 构建菜单选项
+    options = [(str(idx), f"{bot.get('id')} - {bot.get('description', '无描述')}") 
+               for idx, bot in enumerate(owner_bots, 1)]
+    
+    choice = interactive_menu("选择要修改的机器人", options)
+    if choice is None:
+        return
+    
+    selected_bot = owner_bots[int(choice) - 1]
+    
+    # 确认修改
+    if not confirm_dialog(f"确定要修改机器人 '{selected_bot.get('id')}' 吗?\n旧配置将被清除并重新配置。"):
+        info_dialog("已取消修改")
+        return
+    
+    # 删除旧配置
+    bots.remove(selected_bot)
+    save_config(cfg)
+    
+    info_dialog("旧配置已清除，请重新配置")
+    
+    # 重新创建
+    create_robot_with_preset_tui(owner, selected_bot.get('id'))
+
+
+def create_robot_with_preset_tui(preset_owner: str, preset_bot_id: str = None):
+    """TUI 版本使用预设值创建机器人"""
+    cfg = load_config()
+    
+    try:
+        owner = preset_owner
+        
+        # 机器人 ID
+        if preset_bot_id:
+            info_dialog(f"机器人 ID: {preset_bot_id}")
+            bot_id = preset_bot_id
+        else:
+            while True:
+                bot_id = input_dialog("请输入机器人 ID")
+                if not bot_id:
+                    return
+                valid, msg = validate_bot_id_uniqueness(cfg.get("bots", []), owner, bot_id)
+                if valid:
+                    break
+                info_dialog(f"错误: {msg}")
+        
+        description = input_dialog("请输入机器人用途描述")
+        
+        # 企微配置
+        wecom_bot_id = input_dialog("请输入企业微信 Bot ID")
+        if not wecom_bot_id:
+            return
+        
+        wecom_secret = input_dialog("请输入企业微信 Secret")
+        if not wecom_secret:
+            return
+        
+        # 测试连接
+        info_dialog("正在测试企业微信连接...")
+        success, msg = test_wecom_connection(wecom_bot_id, wecom_secret)
+        if not success:
+            if not confirm_dialog(f"连接失败: {msg}\n是否继续配置?"):
+                return
+        
+        # 获取 chatid
+        info_dialog("请在企业微信中给机器人发送一条消息\n(例如: '你好' 或 '开始配置')\n\n等待消息中...")
+        success, result = wait_for_chatid(wecom_bot_id, wecom_secret, timeout=60)
+        
+        if success:
+            chatid = result
+            info_dialog(f"已收到消息！获取到 Chat ID\n发送欢迎消息中...")
+            send_welcome_message(wecom_bot_id, wecom_secret, chatid, owner, bot_id)
+        else:
+            chatid = ""
+            info_dialog(f"未收到消息: {result}\n您可以稍后在配置文件中手动添加 chatid")
+        
+        # Dify 配置
+        dify_api_base = input_dialog("请输入 Dify API Base URL", default="http://127.0.0.1/v1")
+        dify_api_key = input_dialog("请输入 Dify API Key (app-xxx)")
+        
+        if dify_api_key:
+            info_dialog("正在测试 Dify 连接...")
+            success, msg = test_dify_connection(dify_api_base, dify_api_key)
+            if not success:
+                if not confirm_dialog(f"连接失败: {msg}\n是否继续配置?"):
+                    return
+        
+        # 保存配置
+        token = secrets.token_hex(20)
+        
+        bot_entry = {
+            "id": bot_id,
+            "owner": owner,
+            "description": description,
+            "token": token,
+            "wecom": {
+                "bot_id": wecom_bot_id,
+                "secret": wecom_secret
+            },
+            "dify": {
+                "api_base": dify_api_base,
+                "api_key": dify_api_key,
+                "input_variable": "input",
+                "output_variable": "text",
+                "timeout": 60
+            },
+            "default_chatid": chatid,
+            "welcome_message": f"你好！我是{description}，有什么可以帮你的吗？",
+            "thinking_message": "⏳ 思考中..."
+        }
+        
+        cfg["bots"].append(bot_entry)
+        save_config(cfg)
+        
+        # 显示结果
+        port = cfg.get("service", {}).get("notify_port", 8899)
+        host_ip = get_host_ip()
+        
+        docker_url = f"http://host.docker.internal:{port}/notify?token={token}"
+        host_url = f"http://{host_ip}:{port}/notify?token={token}"
+        
+        print_config_result(bot_id, owner, description, docker_url, host_url, port)
+    
+    except KeyboardInterrupt:
+        raise
+
+
+def delete_robot_tui():
+    """TUI 版本删除机器人"""
+    cfg = load_config()
+    bots = cfg.get("bots", [])
+    
+    owner = input_dialog("请输入您的姓名")
+    if not owner:
+        return
+    
+    owner_bots = [bot for bot in bots if bot.get("owner") == owner]
+    
+    if not owner_bots:
+        info_dialog(f"未找到 {owner} 的机器人")
+        return
+    
+    # 构建菜单选项
+    options = [(str(idx), f"{bot.get('id')} - {bot.get('description', '无描述')}") 
+               for idx, bot in enumerate(owner_bots, 1)]
+    
+    choice = interactive_menu("选择要删除的机器人", options)
+    if choice is None:
+        return
+    
+    selected_bot = owner_bots[int(choice) - 1]
+    
+    # 确认删除
+    if not confirm_dialog(f"警告: 即将删除机器人 '{selected_bot.get('id')}'\n此操作不可恢复！"):
+        info_dialog("已取消删除")
+        return
+    
+    # 执行删除
+    bots.remove(selected_bot)
+    save_config(cfg)
+    
+    info_dialog(f"机器人 '{selected_bot.get('id')}' 已删除")
+
+
+def cmd_gateway(action: str = None, value: str = None):
+    """管理网关配置（端口、日志级别等）"""
+    cfg = load_config()
+    service = cfg.get("service", {})
+    
+    if action is None:
+        # 显示当前网关配置
+        print()
+        print(bold("=" * 60))
+        print(bold("  网关配置"))
+        print(bold("=" * 60))
+        print()
+        print(f"  端口:      {cyan(str(service.get('notify_port', 8899)))}")
+        print(f"  日志级别:  {cyan(service.get('log_level', 'INFO'))}")
+        print()
+        print(gray("  修改命令:"))
+        print(f"    bridge gateway port 8899     {gray('# 修改端口')}")
+        print(f"    bridge gateway loglevel DEBUG {gray('# 修改日志级别')}")
+        print()
+        print(bold("=" * 60))
+        print()
+        return
+    
+    if action == "port":
+        if value is None:
+            print(red("错误: 请指定端口号"))
+            print(f"  示例: bridge gateway port 8899")
+            return
+        try:
+            port = int(value)
+            if port < 1 or port > 65535:
+                raise ValueError("端口范围 1-65535")
+        except ValueError as e:
+            print(red(f"错误: 无效的端口号 - {e}"))
+            return
+        
+        cfg["service"]["notify_port"] = port
+        save_config(cfg)
+        print(green(f"✅ 端口已修改为: {port}"))
+        print(yellow("  ⚠️  重启服务后生效: bridge restart"))
+    
+    elif action == "loglevel":
+        if value is None:
+            print(red("错误: 请指定日志级别"))
+            print(f"  可选: DEBUG, INFO, WARNING, ERROR")
+            return
+        
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
+        value = value.upper()
+        if value not in valid_levels:
+            print(red(f"错误: 无效的日志级别 '{value}'"))
+            print(f"  可选: {', '.join(valid_levels)}")
+            return
+        
+        cfg["service"]["log_level"] = value
+        save_config(cfg)
+        print(green(f"✅ 日志级别已修改为: {value}"))
+        print(yellow("  ⚠️  重启服务后生效: bridge restart"))
+    
+    else:
+        print(red(f"错误: 未知的网关配置项 '{action}'"))
+        print(f"  可用: port, loglevel")
+
+
+def cmd_doctor():
+    """诊断检查"""
+    print()
+    print(bold("=" * 60))
+    print(bold("  Bridge 诊断检查"))
+    print(bold("=" * 60))
+    print()
+    
+    issues = []
+    
+    # 检查配置文件
+    if os.path.exists(CONFIG_FILE):
+        print(f"  配置文件:     {green('存在')}")
+        try:
+            cfg = load_config()
+            print(f"  配置解析:     {green('正常')}")
+        except Exception as e:
+            print(f"  配置解析:     {red('失败')} ({e})")
+            issues.append("配置文件损坏")
+    else:
+        print(f"  配置文件:     {yellow('不存在')}（将自动创建）")
+    
+    # 检查服务状态
+    running, pid = is_running(PID_FILE)
+    if running:
+        print(f"  服务状态:     {green('运行中')} (PID: {pid})")
+    else:
+        print(f"  服务状态:     {yellow('未运行')}")
+    
+    # 检查依赖
+    try:
+        from wecom_aibot_sdk import WSClient
+        print(f"  wecom-aibot-sdk: {green('已安装')}")
+    except ImportError:
+        print(f"  wecom-aibot-sdk: {red('未安装')}")
+        issues.append("缺少 wecom-aibot-sdk")
+    
+    # 检查防火墙
+    print()
+    print(gray("  防火墙检查:"))
+    cfg = load_config()
+    port = cfg.get("service", {}).get("notify_port", 8899)
+    
+    # 检查 ufw
+    if shutil.which("ufw"):
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["ufw", "status"], capture_output=True, text=True
+            )
+            if "active" in result.stdout.lower():
+                if str(port) in result.stdout:
+                    print(f"    ufw:        {green('端口 {port} 已开放')}")
+                else:
+                    print(f"    ufw:        {yellow('端口 {port} 可能未开放')}")
+                    issues.append(f"ufw 防火墙可能拦截端口 {port}")
+            else:
+                print(f"    ufw:        {gray('未启用')}")
+        except Exception:
+            print(f"    ufw:        {gray('无法检查')}")
+    
+    # 检查 firewalld
+    if shutil.which("firewall-cmd"):
+        print(f"    firewalld:  {gray('请手动检查端口 {port} 是否开放')}")
+    
+    # 网络连通性检查
+    print()
+    print(gray("  网络连通性检查:"))
+    
+    import urllib.request
+    import ssl
+    
+    # 获取本机 IP
+    host_ip = get_host_ip()
+    health_url = f"http://{host_ip}:{port}/health"
+    
+    # 尝试访问健康检查端点
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        req = urllib.request.Request(health_url, method='GET')
+        with urllib.request.urlopen(req, timeout=3, context=ctx) as resp:
+            if resp.status == 200:
+                print(f"    本地访问:   {green('正常')} ({health_url})")
+            else:
+                print(f"    本地访问:   {yellow('异常')} HTTP {resp.status}")
+    except Exception as e:
+        print(f"    本地访问:   {red('失败')} {str(e)[:40]}")
+        if not running:
+            issues.append("服务未运行，无法访问 HTTP 端点")
+        else:
+            issues.append(f"HTTP 服务异常: {e}")
+    
+    # Dify 部署场景指南
+    print()
+    print(bold("  Dify 部署场景配置指南"))
+    print(bold("  " + "-" * 56))
+    print()
+    print(cyan("  场景 1: 本地 Docker 部署 Dify"))
+    print(f"    • Bridge 地址: {white(f'http://host.docker.internal:{port}')}")
+    print(f"    • 或直接使用宿主机 IP: {white(f'http://{host_ip}:{port}')}")
+    print(gray("    • 确保 Docker 容器可以访问宿主机网络"))
+    print()
+    print(cyan("  场景 2: 服务器部署 Dify + Bridge"))
+    print(f"    • Bridge 地址: {white(f'http://{host_ip}:{port}')}")
+    print(f"    • 或使用公网 IP/域名: {white(f'http://<公网IP>:{port}')}")
+    print(gray("    • 确保防火墙开放端口 {port}"))
+    print(gray("    • 确保 Dify 服务器能访问 Bridge 服务器"))
+    print()
+    print(cyan("  场景 3: Dify 官网 (cloud.dify.ai)"))
+    print(f"    • Bridge 必须部署在公网可访问的服务器")
+    print(f"    • 使用公网 IP 或域名: {white(f'http://<公网IP或域名>:{port}')}")
+    print(gray("    • 确保路由器/防火墙做端口映射"))
+    print(gray("    • 或使用内网穿透工具 (ngrok/frp)"))
+    print()
+    print(bold("  " + "-" * 56))
+    
+    print()
+    print(bold("=" * 60))
+    if issues:
+        print(yellow(f"  发现 {len(issues)} 个问题:"))
+        for issue in issues:
+            print(f"    - {issue}")
+    else:
+        print(green("  ✓ 所有检查通过"))
+    print(bold("=" * 60))
+    print()
+
+
+# ── 主入口 ────────────────────────────────────────────────────
+
+def main():
+    """CLI 主入口"""
+    args = sys.argv[1:]
+    
+    if not args:
+        print(__doc__)
+        sys.exit(0)
+    
+    command = args[0]
+    
+    if command == "start":
+        cmd_start()
+    elif command == "stop":
+        cmd_stop()
+    elif command == "restart":
+        cmd_restart()
+    elif command == "status":
+        cmd_status()
+    elif command == "logs":
+        lines = 50
+        follow = False
+        for arg in args[1:]:
+            if arg == "-f" or arg == "--follow":
+                follow = True
+            elif arg.isdigit():
+                lines = int(arg)
+        cmd_logs(lines=lines, follow=follow)
+    elif command == "id":
+        bot_id = args[1] if len(args) > 1 else None
+        cmd_id(bot_id)
+    elif command == "config":
+        cmd_config()
+    elif command == "gateway":
+        action = args[1] if len(args) > 1 else None
+        value = args[2] if len(args) > 2 else None
+        cmd_gateway(action, value)
+    elif command == "doctor":
+        cmd_doctor()
+    else:
+        print(red(f"错误: 未知命令 '{command}'"))
+        print()
+        print("可用命令:")
+        print("  start, stop, restart, status, logs, id, config, gateway, doctor")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

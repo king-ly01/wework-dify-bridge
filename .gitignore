@@ -13,6 +13,13 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Python 包元数据（自动生成）
+*.egg-info/
+*.egg
+*.whl
+build/
+dist/
+
 # 打包产物
 *.zip
 *.tar.gz
@@ -21,3 +28,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# VS Code 编辑器状态
+.openeditors/
