@@ -88,4 +88,5 @@ networks:
     driver: bridge
   # 连接到 Dify 的网络，让 Dify 可以访问 WEDBRIDGE API
   docker_default:
+    name: ${DIFY_NETWORK:-docker_default}
     external: true
