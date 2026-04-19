@@ -44,13 +44,13 @@ services:
 
   # Web 前端
   web:
-    image: nginx:alpine
+    image: ghcr.io/king-ly01/wedbridge-web:latest
+    build:
+      context: ..
+      dockerfile: docker/web/Dockerfile
     container_name: wedbridge-web
     ports:
       - "${WEB_PORT:-80}:80"
-    volumes:
-      - ../web/dist:/usr/share/nginx/html:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api
     restart: unless-stopped

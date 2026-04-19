@@ -1,20 +1,28 @@
-# Web Frontend - Vue 3 + Vite
-FROM node:20-alpine
+# ============ Stage 1: Build ============
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# 安装依赖
-RUN npm install -g npm@latest
+# npm 换国内源
+RUN npm config set registry https://registry.npmmirror.com
 
-# 复制 package.json
+# 安装依赖（利用缓存）
 COPY web/package*.json ./
 RUN npm install
 
-# 复制源代码
+# 复制源代码并构建
 COPY web/ .
+RUN npm run build
 
-# 暴露端口
-EXPOSE 3000
+# ============ Stage 2: Production ============
+FROM nginx:alpine
 
-# 开发模式启动
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+# 复制构建产物
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# 复制 nginx 配置
+COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
