@@ -329,52 +329,29 @@ WORKER_SYNC_INTERVAL=5
 - 在 WEDBRIDGE Web 界面，点击机器人「详情」
 - 复制「回调 URL」中的 token 参数
 
-### 6.4 SSRF 代理配置（必须）
+### 6.4 关闭 SSRF 代理（必须）
 
-Dify 的 HTTP 节点请求经过 SSRF 代理，必须将 WEDBRIDGE IP 加入白名单。
+Dify 默认开启 SSRF 代理保护，会拦截 HTTP 节点对内网地址的请求。如果 Dify 和 WEDBRIDGE 在同一服务器，**必须关闭 SSRF 代理**，否则 Dify 工作流无法回调 WEDBRIDGE。
 
-**步骤 1：找到配置文件**
+#### 方法一：注释 SSRF 代理配置（推荐）
 
-```bash
-/path/to/dify/docker/ssrf_proxy/squid.conf.template
-```
-
-**步骤 2：添加白名单**
-
-在 `http_access deny all` **之前**添加：
-
-```conf
-# WEDBRIDGE 服务 IP（根据实际情况修改）
-acl notify_host dst 192.168.1.100
-acl notify_port port 80
-http_access allow notify_host notify_port
-```
-
-**步骤 3：重启 SSRF Proxy**
+编辑 Dify 的 `.env` 文件：
 
 ```bash
 cd /path/to/dify/docker
-docker compose restart ssrf_proxy
+vim .env
 ```
 
-**步骤 4：验证配置**
+找到以下行并**注释掉**：
 
 ```bash
-# 查看 Squid 访问日志
-docker exec dify-ssrf_proxy-1 tail -f /var/log/squid/access.log
+# 注释掉这两行，关闭 SSRF 代理
+#HTTP_PROXY=http://ssrf_proxy:3128
+#HTTPS_PROXY=http://ssrf_proxy:3128
 
-# 正常应显示：TCP_MISS/200
-# 失败显示：TCP_DENIED
-```
-
-### 6.5 Dify 环境变量配置
-
-如果 Dify 和 WEDBRIDGE 在同一 Docker 网络，需要修改 Dify 的 `.env`：
-
-```bash
-# 注释掉代理配置，允许内网访问
-# SANDBOX_HTTP_PROXY=http://ssrf_proxy:3128
-# SANDBOX_HTTPS_PROXY=http://ssrf_proxy:3128
+# 同时注释掉 Sandbox 的代理配置
+#SANDBOX_HTTP_PROXY=http://ssrf_proxy:3128
+#SANDBOX_HTTPS_PROXY=http://ssrf_proxy:3128
 ```
 
 然后重启 Dify：
@@ -384,6 +361,50 @@ cd /path/to/dify/docker
 docker compose down
 docker compose up -d
 ```
+
+#### 方法二：配置 SSRF 白名单
+
+如果不想完全关闭 SSRF 代理，可以将 WEDBRIDGE 的 IP 加入白名单：
+
+**步骤 1：查看 WEDBRIDGE 容器 IP**
+
+```bash
+docker inspect wedbridge-api | grep IPAddress
+```
+
+**步骤 2：编辑 Squid 配置**
+
+```bash
+vim /path/to/dify/docker/ssrf_proxy/squid.conf.template
+```
+
+在 `http_access deny all` **之前**添加：
+
+```conf
+# WEDBRIDGE 服务（根据实际 IP 修改）
+acl wedbridge_net dst 172.16.0.0/12
+http_access allow wedbridge_net
+```
+
+**步骤 3：重启 SSRF Proxy**
+
+```bash
+cd /path/to/dify/docker
+docker compose restart ssrf_proxy
+```
+
+**步骤 4：验证**
+
+```bash
+# 查看 Squid 日志
+docker exec dify-ssrf_proxy-1 tail -f /var/log/squid/access.log
+# 正常：TCP_MISS/200
+# 被拦截：TCP_DENIED
+```
+
+#### 验证 SSRF 是否已关闭
+
+在 Dify 工作流中添加一个 HTTP 节点，请求 `http://wedbridge-api:8899/api/health`。如果返回成功，说明 SSRF 配置正确。
 
 ---
 
