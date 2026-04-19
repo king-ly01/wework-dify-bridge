@@ -3,6 +3,7 @@ name: wedbridge
 services:
   # API 服务
   api:
+    image: ghcr.io/king-ly01/wedbridge-api:latest
     build:
       context: ..
       dockerfile: docker/api/Dockerfile
@@ -23,6 +24,7 @@ services:
 
   # Worker 服务
   worker:
+    image: ghcr.io/king-ly01/wedbridge-worker:latest
     build:
       context: ..
       dockerfile: docker/worker/Dockerfile
